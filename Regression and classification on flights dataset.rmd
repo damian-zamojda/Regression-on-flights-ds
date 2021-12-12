@@ -1,0 +1,423 @@
+---
+title: "Machine Learning Project - regression and classification on flights dataset"
+author: "Joanna Ceglińska (384622), Damian Żamojda (386905)"
+date: "7th June 2020"
+output:
+  html_document:
+    number_sections: true
+    theme: spacelab
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+fontsize: 12pt
+---
+
+
+```{r setup, include=FALSE}
+# rm(list = ls())
+options(scipen=999)
+Sys.setenv(LANG = "en")
+setwd("D:/R_Python/ML/Project/")
+
+```
+
+```{r libraries, include=FALSE}  
+# loading all the libraries used in the project
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(caret)
+library(corrplot)
+library(tidyverse)
+library(glmnet)
+library(olsrr)
+library(knitr)
+library(kableExtra)
+
+regressionMetrics <- function(real, predicted) {
+  # Mean Square Error
+  MSE <- mean((real - predicted)^2)
+  # Root Mean Square Error
+  RMSE <- sqrt(MSE)
+  # Mean Absolute Error
+  MAE <- mean(abs(real - predicted))
+  # Median Absolute Error
+  MedAE <- median(abs(real - predicted))
+  # Mean Logarithmic Absolute Error
+  MSLE <- mean((log(1 + real) - log(1 + predicted))^2)
+  # Total Sum of Squares
+  TSS <- sum((real - mean(real))^2)
+  # Explained Sum of Squares
+  RSS <- sum((predicted - real)^2)
+  # R2
+  R2 <- 1 - RSS/TSS
+  
+  result <- data.frame(MSE, RMSE, MAE, MedAE, MSLE, R2)
+  return(result)
+}
+```
+
+# Introduction
+
+If you have ever traveled by a plane, you have probably noticed how unreliable mean of transport it can be. Even though it is considered to be the safest available form of trasportation, it is also highly dependent on the weather and current socioeconomic situation. Flight delays and cancellations happen every day, sometimes very unexpectedly.
+
+The aim of this research is to investigate the factors that may contribute to flight delays. For this purpose we have used a dataset provided by the U.S. Department of Transportation, Bureau of Transportation Statistics. We have compared the performance of three linear regressions to estimate the delay of the flight and to find the significant determinants of this event's occurence.
+
+# Data description and processing
+
+The dataset used in this project was downloaded from [Kaggle](https://www.kaggle.com/usdot/flight-delays). It was published on the U.S. Department of Transportation, Bureau of Transportation Statistics website and it provides information about both domestic and foreign flights from 2015. The data includes information about on-time flights, cancellations, diversions and delays. The variables also indicate the day of the month, day of the week, flight number, airports of origin and destinatination and many regarding the exact duration of taxiing and flight itself.
+
+As it is presented below, the dataset consists of 31 variables and over 5 million observations.
+
+
+```{r data, include = FALSE}  
+data <- read.csv2("flights.csv", sep=',')
+
+str(data)
+dim(data)
+
+# 5819079 observations
+# 31 variables
+
+```
+
+## Data processing
+
+The processing of the data included the analysis of missing observations. We have calculated the percentage of missing value for each variable. It is recommended not to include variables which have more than 20% of the observations missing.
+
+Here we can see, that few variables have the share of missing much larger than we are willing to accept - these are AIR_SYSTEM_DELAY, SECURITY_DELAY, AIRLINE_DELAY, LATE_AIRCRAFT_DELAY and WEATHER_DELAY. We have also investigated the CANCELLATION_REASON, and we noticed that even though the analysis of number of missings did not state a large share of NA's, the majority of observations is blank (5.729.195). We have decided to drop these variables. 
+
+
+```{r missing}
+missing_perc <- (colSums(is.na(data))/dim(data)[1]) %>%
+  sort(decreasing = TRUE)
+missing_perc
+
+summary(data$CANCELLATION_REASON)
+# Code	Description
+# (blank) NO DATA
+# A	Carrier
+# B	Weather
+# C	National Air System
+# D	Security
+
+
+# dropping columns with a large share of missing values
+to_drop <- c("AIR_SYSTEM_DELAY", "SECURITY_DELAY", "AIRLINE_DELAY", "LATE_AIRCRAFT_DELAY", "WEATHER_DELAY", "CANCELLATION_REASON")
+data <- data[,-which(names(data) %in% to_drop)]
+
+```
+
+Next, we also decided to drop variables which concern time (hours and minutes) of a particular event, for example departure time, the beginning and ending of the taxiying, scheduled arrival etc. We do not include these variables in the dataset, because we already use variables that provide information about the length of the flight, distance and other useful factors. The interpretation of these variables would also be challenging. 
+
+
+```{r time}
+time_vars <- c("SCHEDULED_DEPARTURE", "DEPARTURE_TIME", "WHEELS_ON", "WHEELS_OFF",
+               "SCHEDULED_TIME", "TAXI_IN", "TAXI_OUT", "SCHEDULED_ARRIVAL", "ARRIVAL_TIME")
+data <- data[,-which(names(data) %in% time_vars)]
+
+```
+
+Lastly, we omitted variables which do not provide much value to the research - year, because all observations are from 2015, thus it was a constant. We also dropped variables which showed whether the flight was cancelled or diverted (the significant majority of flights were not diverted nor cancelled) and tail number, which is a factor variable that has too many levels and is irrelevant for the analysis.
+
+
+```{r meaningless_vars}
+table(data$DIVERTED)
+table(data$CANCELLED)
+```
+```{r meaningless, include = FALSE}
+meaningless_vars <- c("YEAR", "DIVERTED", "CANCELLED", "TAIL_NUMBER")
+data <- data[,-which(names(data) %in% meaningless_vars)]
+
+```
+
+## Creating new variables
+ 
+To fully benefit from variables which showed the airports of departure and destination, we have created three new variables. Firstly, we extracted the 3-letter indicators of American airports and then we created two binary variables which tells us whether the airport of origin (USA_ORIG) and the airport of destination (USA_DEST) is American. Finally, we created a third binary variable which was equal to 1 if the American flight was domestic (both previously calculated variables were equal to 1).
+
+
+```{r airports}
+american_airports <- c("ATL", "ORD", "DFW", "DEN", "LAX", "SFO", "PHX", "IAH", "LAS", "MSP", "MCO", "SEA", "DTW", "BOS",
+                       "EWR", "CLT", "LGA", "SLC", "JFK", "BWI", "MDW", "DCA", "FLL", "SAN", "MIA", "PHL", "TPA", "DAL",
+                       "HOU", "BNA", "PDX", "STL", "HNL", "OAK", "AUS", "MSY", "MCI", "SJC", "SMF", "SNA", "CLE", "IAD",
+                       "RDU", "MKE", "SAT", "RSW", "IND", "SJU", "CMH", "PIT", "PBI", "OGG", "CVG", "ABQ", "BUR", "BDL",
+                       "JAX", "ONT", "BUF", "OMA", "OKC", "ANC", "RIC", "TUS", "MEM", "TUL", "RNO", "BHM", "ELP", "CHS",
+                       "BOI", "KOA", "PVD", "GRR", "LIH", "LIT", "SDF", "GEG", "ORF", "XNA", "MSN", "PSP", "LGB")
+
+data$USA_ORIG <- ifelse(data$ORIGIN_AIRPORT %in% american_airports, 1, 0)
+data$USA_DEST <- ifelse(data$DESTINATION_AIRPORT %in% american_airports, 1, 0)
+data$US_FLIGHT <- ifelse(data$USA_ORIG == 1 & data$USA_DEST == 1, 1, 0)
+
+```
+
+To see whether the flight was in the first of the second half of the month, we have created a binary variable that was equal to 1 if the flight took place between the 1st and 15th day of the month, and 2 otherwise (16th - 31st).
+
+```{r month_half}
+data$MONTH_HALF <- ifelse(data$DAY %in% 1:15, 1, 2)
+```
+
+Then, we dropped all three previously converted variables not to duplicate the information provided by them. The final step was to drop all the observations that had missing values.
+
+
+```{r conv_vars}
+already_converted_vars <- c("ORIGIN_AIRPORT", "DESTINATION_AIRPORT", "DAY")
+data <- data[,-which(names(data) %in% already_converted_vars)]
+
+data <- na.omit(data)
+```
+
+## Format correction
+
+To make sure that all variables are in a correct format, we converted categorical variables to factors. These were: MONTH, MONTH_HALF, DAY_OF_WEEK, USA_ORIG, USA_DEST and US_FLIGHT.
+
+
+```{r factors}
+v <- c("MONTH", "MONTH_HALF", "DAY_OF_WEEK", "USA_ORIG", "USA_DEST", "US_FLIGHT")
+for (i in v)  data[,i] <- factor(data[,i])
+```
+
+Additionally, to make the interpretation of model results easier, we have transformed the numeric values of a categorical variable DAY_OF_WEEK to real names of days of the week. 
+
+In the end we have all the variables in the correct form and the final version of the dataset has 5.714.008 observations and 13 variables. The determinants used in the modelling part are listed below:
+
+* MONTH - month in which the flight took place, value from 1 to 12;
+* DAY_OF_WEEK - day of the week in which the flight took place;
+* AIRLINE - airline index, factor variable with 14 levels;
+* FLIGHT_NUMBER - number of a flight, integer;
+* DEPARTURE_DELAY - the delay of the departure in minutes, continuous variable;
+* ELAPSED_TIME - elapsed time of the flight in minutes, continuous variable;
+* AIR_TIME - the duration of the time spent in the air in minutes, continuous variable;
+* DISTANCE - the distance between the origin airport and the destination airport in miles, continuous variable;
+* ARRIVAL_DELAY - the delay of the arrival in minutes, continuous variable;
+* USA_ORIG - binary variable, 1 if the airport of origin is American;
+* USA_DEST - binary variable, 1 if the airport of destination is American;
+* US_FLIGHT - binary variable, 1 if both the airport of origin and the airport of destination are American;
+* MONTH_HALF - binary variable, 1 if the flight took place in the first half of the month, 2 otherwise;
+
+
+```{r days_week}
+data$DAY_OF_WEEK <- factor(data$DAY_OF_WEEK,
+                          levels = c(1,2,3,4,5,6,7),
+                          labels = c("Mon",
+                                     "Tue",
+                                     "Wed",
+                                     "Thur",
+                                     "Fri",
+                                     "Sat",
+                                     "Sun"))
+
+```
+## Dependent variable selection
+
+To select a dependent variable, we have calculated the number of rows which are non-negative for two variables that we were interested in investigating: DEPARTURE_DELAY and ARRIVAL_DELAY. Since the number of rows appropriate for delay analysis is bigger for the DEPARTURE_DELAY, we have decided to choose this one as the dependent variable in the regression.
+
+```{r dep_var}
+data %>%
+  dplyr::filter(data$DEPARTURE_DELAY >= 0) %>% nrow
+
+data %>%
+  dplyr::filter(data$ARRIVAL_DELAY >= 0) %>% nrow
+```
+## Dependent variable plot and processing
+
+We have selected the observations, for which the delay of the departure was larger than or equal to zero. Then we have created a histogram to visualize the distribution of this variable. As it is presented in the plot below, the distribution is right-skewed and highly asymmetrical.
+
+```{r dep_var_plot1}
+summary(data$DEPARTURE_DELAY)
+data <- data[data$DEPARTURE_DELAY >= 0,]
+
+ggplot(data, aes(DEPARTURE_DELAY)) +
+  geom_histogram(aes(y=..count..),
+                 fill="#c7ceea",
+                 alpha = 0.8,
+                 color="black", 
+                 bins = 30) +
+  labs(x = "Departure delay", y = "Frequency")
+
+```
+
+To make the distribution of the dependent variable more symmetrical and close to the normal distribution, we have used the natural logarithm of the departure delay. To perform this action, we added 1 to all the observations to avoid the problem of computing the natural logarithm of 0. The results are shown in the plot below.
+
+
+```{r dep_var_plot2}
+data$DEPARTURE_DELAY <- data$DEPARTURE_DELAY + 1
+data$log_DEPARTURE_DELAY <- log(data$DEPARTURE_DELAY)
+
+ggplot(data, aes(log_DEPARTURE_DELAY)) +
+  geom_histogram(aes(y=..count..),
+                 fill="#c7ceea",
+                 alpha = 0.8,
+                 color="black", 
+                 bins = 30) +
+  labs(x = "Departure delay (ln)", y = "Frequency")
+```
+
+# Empirical research
+
+
+## Creating subsamples
+
+
+Firstly, we have split the data into two subsamples - training sample (70%) and test sample (30%). The first sample will be used to train the model and then we will comapre the obtained estimations to the real observed values from the test sample. As it is presented, the distribution among the two subsamples is very similar - the mean and median values are almost the same, and the only statistic that differs is the maximum value (7.538 in the training sample and 7.595 in the test sample).
+
+```{r training_test }
+set.seed(987654321)
+data_which_train <- createDataPartition(data$log_DEPARTURE_DELAY,
+                                          p = 0.7,
+                                          list = FALSE)
+
+data_train <- data[data_which_train,]
+data_test <- data[-data_which_train,]
+
+summary(data_train$log_DEPARTURE_DELAY)
+summary(data_test$log_DEPARTURE_DELAY)
+```
+
+## Correlation matrix
+
+To present a correlation matrix, we have extracted all the numeric variables included in the research. Then, we calculated the correlation between the dependent variable (departure delay) with each independent variable. After sorting them in a descending order, we obtain a plot below. 
+
+
+```{r copy, include = FALSE}
+# Taking numeric variables for correation
+data_numeric_vars <-
+  sapply(data, is.numeric) %>%
+  which() %>%
+  names()
+
+# Correlation matrix
+data_correlations <-
+  cor(data_train[,data_numeric_vars],
+      use = "pairwise.complete.obs")
+
+data_numeric_vars_order <-
+  data_correlations[,"DEPARTURE_DELAY"] %>%
+  sort(decreasing = TRUE) %>%
+  names()
+
+```
+
+```{r corelation }
+corrplot.mixed(data_correlations[data_numeric_vars_order,
+                                   data_numeric_vars_order],
+               upper = "square",
+               lower = "number",
+               tl.col="black",
+               tl.pos = "lt")
+```
+
+The variable which is the most correlated with the dependent variable is the ARRIVAL_DELAY. It is not surprising, as we may expect that if a plane departures with a delay, it will probably land with a similar delay as well. In this research we aim to predict the delay of the departure, and since the information about the arrival delay is known after the information about the departure delay, we should not explain the dependent variable with a future occurence, thus we decided to exclude this variable from the further research.
+
+Other correlations that are easily visible in the plot are between the elapsed time and airtime and distance. Similarly, the distance is correlated with airtime and elapsed time. 
+
+
+```{r del_corr }
+data_train <- select(data_train,-c("ARRIVAL_DELAY"))
+data_test <- select(data_test,-c("ARRIVAL_DELAY"))
+
+```
+
+
+```{r var_sel, include = FALSE }
+# All variables
+data_variables_all <- names(data_train)
+data_variables_all
+
+# Numeric variables
+data_train_numeric_vars <-
+  sapply(data_train, is.numeric) %>%
+  which() %>%
+  names()
+data_train_numeric_vars
+
+# Qualitative variables
+data_train_factor_vars <-
+  sapply(data_train, is.factor) %>%
+  which() %>%
+  names()
+data_train_factor_vars
+
+save(list = c("data_train", "data_test"),
+     file = "data_train_test.RData")
+
+```
+## Finding linear combinations
+
+We also confirmed, that there are no linear combinations between numeric variables included in the analysis, by executing a findLinearCombos function, which enumerated and resolves the linear combinations in a numeric matrix. There are no variables that are recommended to be dropped.
+
+
+```{r linear_comb }
+data_linear_comb <- findLinearCombos(data_train[, data_train_numeric_vars])
+data_linear_comb
+```
+## ANOVA
+
+The next step was to analyse the variance of the dependent variable and categorial variables included in the model. The null hypothesis is that levels of the explanatory variable influence the dependent variable equally. The higher the F-statistic is, the stronger is the rejection of the null hypothesis (the more significant the variable <i> x </i> is in the variability of <i> y </i>).
+
+The strongest rejection is for AIRLINE (F statistic = 2277.688), MONTH (F statistic = 1168.349), USA_DEST (F statistic = 484.854).
+
+
+```{r anova }
+data_F_anova <- function(data_train_factor_vars) {
+  anova_ <- aov(data_train$log_DEPARTURE_DELAY ~
+                  data_train[[data_train_factor_vars]])
+  return(summary(anova_)[[1]][1, 4]) # getting F statistic
+}
+
+data_anova_all_categorical <- sapply(data_train_factor_vars, data_F_anova) %>%
+  sort(decreasing = TRUE) # sorted in the decreasing order of F
+data_anova_all_categorical
+
+```
+
+## Estimated models
+
+The first performed model using caret package is a <b> ordinary least squares estimation </b>. The dependent variable is the logarithm of the departure delay and we chose all other variables as regressors. The model was executed only on the training sample and then it was tested on the test sample.
+
+The second estimated model was a ridge regression, which is a machine learning method. It is particularly useful when there is a danger of collinearity in the data. This algorithms is more robust than a simple OLS model when it comes to overfitting to the training data. 
+
+The last model was Lasso - this method is similar to the ridge regression, as it also shrinks the Beta parameters to zero. This model, however, is easier to interpret than ridge regression.
+
+Ridge and Lasso models were estimated using no cross-validation and with a 5-fold cross-validation.
+
+
+
+###  In sample results
+
+```{r}
+load('results.Rdata')
+results_is <- rbind(data_linear_nocv_is, data_ridge_nocv_is, data_ridge_cv_is, data_lasso_nocv_is, data_lasso_cv_is)
+row.names(results_is) <- c('OLS','Ridge (no cv)','Ridge (cv)','Lasso (no cv)', 'Lasso (cv)')
+results_is %>% 
+  kable() %>% 
+  kableExtra::kable_styling(full_width = T, 
+                            position = 'left', 
+                            font_size = 12)
+
+```
+
+### Out of sample results
+
+```{r}
+results_oss <- rbind(data_linear_nocv_oss, data_ridge_nocv_oss, data_ridge_cv_oss, data_lasso_nocv_oss, data_lasso_cv_oss)
+row.names(results_oss) <- c('OLS','Ridge (no cv)','Ridge (cv)','Lasso (no cv)', 'Lasso (cv)')
+results_oss %>% 
+  kable() %>% 
+  kableExtra::kable_styling(full_width = T, 
+                            position = 'left', 
+                            font_size = 12)
+
+```
+
+# Summary
+
+As it is visible in the tables above, the in-sample results were the best in the case in OLS method ad none of the machine learning model outperformed the standard regression. The R-squared in this case is equal to 50.3% and the RMSE is equal to 1.0463. Lasso regression with cross validation provided similar results, but the root mean square error was slightly higher (1.0475).
+
+The out-of-sample results provided similar conclusions - the OLS model was the best as well, and the R-squared is equal to 50.5%. The RMSE is equal to 1.0443 and it was lower than the second lowest (for Lasso with cross validation) by 0.00123.
+
+
+
+
+
