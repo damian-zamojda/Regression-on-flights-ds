@@ -1,5 +1,5 @@
 ---
-title: "Machine Learning Project - regression and classification on flights dataset"
+title: "Regression and classification on flights dataset"
 author: "Joanna Ceglińska (384622), Damian Żamojda (386905)"
 date: "7th June 2020"
 output:
